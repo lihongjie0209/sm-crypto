@@ -75,3 +75,123 @@ test('sm4: invalid padding', () => {
     expect(() => sm4.decrypt('a0b1aac2e6db928ddfc8a081a6661d0452b44e5720db106714ffc8cbee29bcf7d96b4d64bffd07553e6a2ee096523b7a', keyHexStr)).toThrow('padding is invalid')
     expect(() => sm4.decrypt('a0b1aac2e6db928ddfc8a081a6661d0452b44e5720db106714ffc8cbee29bcf7d96b4d64bffd07553e6a2ee096523b7f', ivHexStr)).toThrow('padding is invalid')
 })
+
+// GCM Mode Tests
+test('sm4-gcm: basic encryption and decryption', () => {
+  const msg = 'hello world'
+  const key = '0123456789abcdeffedcba9876543210'
+  const iv = '000102030405060708090a0b'
+  const aad = ''
+
+  const encrypted = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad})
+  expect(encrypted).toHaveProperty('ciphertext')
+  expect(encrypted).toHaveProperty('tag')
+  expect(typeof encrypted.ciphertext).toBe('string')
+  expect(typeof encrypted.tag).toBe('string')
+  expect(encrypted.tag.length).toBe(32) // 16 bytes = 32 hex chars
+
+  const decrypted = sm4.decrypt(encrypted, key, {mode: 'gcm', iv, aad})
+  expect(decrypted).toBe(msg)
+})
+
+test('sm4-gcm: known test vectors', () => {
+  // Test vector 1
+  const result1 = sm4.encrypt('hello world', '0123456789abcdeffedcba9876543210', {
+    mode: 'gcm', 
+    iv: '000102030405060708090a0b', 
+    aad: ''
+  })
+  expect(result1.ciphertext).toBe('3d4474fdde91de7016ece7')
+  expect(result1.tag).toBe('821ccac5fddfac593634ca5363b25c76')
+  
+  // Verify decryption
+  const decrypt1 = sm4.decrypt(result1, '0123456789abcdeffedcba9876543210', {
+    mode: 'gcm', 
+    iv: '000102030405060708090a0b', 
+    aad: ''
+  })
+  expect(decrypt1).toBe('hello world')
+})
+
+test('sm4-gcm: encryption and decryption with AAD', () => {
+  const msg = 'test message with authentication'
+  const key = '0123456789abcdeffedcba9876543210'
+  const iv = '000102030405060708090a0b'
+  const aad = '112233445566778899aabbccddee'
+
+  const encrypted = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad})
+  const decrypted = sm4.decrypt(encrypted, key, {mode: 'gcm', iv, aad})
+  expect(decrypted).toBe(msg)
+})
+
+test('sm4-gcm: authentication failure with wrong AAD', () => {
+  const msg = 'secret message'
+  const key = '0123456789abcdeffedcba9876543210'
+  const iv = '000102030405060708090a0b'
+  const aad = '112233445566778899aabbcc'
+
+  const encrypted = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad})
+  
+  expect(() => {
+    sm4.decrypt(encrypted, key, {mode: 'gcm', iv, aad: '112233445566778899aabbcd'})
+  }).toThrow('Authentication tag verification failed')
+})
+
+test('sm4-gcm: different tag lengths', () => {
+  const msg = 'test message'
+  const key = '0123456789abcdeffedcba9876543210'
+  const iv = '000102030405060708090a0b'
+  const aad = ''
+
+  // Test with 12-byte tag
+  const encrypted12 = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad, tagLength: 12})
+  expect(encrypted12.tag.length).toBe(24) // 12 bytes = 24 hex chars
+  
+  const decrypted12 = sm4.decrypt(encrypted12, key, {mode: 'gcm', iv, aad, tagLength: 12})
+  expect(decrypted12).toBe(msg)
+
+  // Test with 8-byte tag
+  const encrypted8 = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad, tagLength: 8})
+  expect(encrypted8.tag.length).toBe(16) // 8 bytes = 16 hex chars
+  
+  const decrypted8 = sm4.decrypt(encrypted8, key, {mode: 'gcm', iv, aad, tagLength: 8})
+  expect(decrypted8).toBe(msg)
+})
+
+test('sm4-gcm: array input/output format', () => {
+  const msg = [0x68, 0x65, 0x6c, 0x6c, 0x6f] // "hello"
+  const key = '0123456789abcdeffedcba9876543210'
+  const iv = '000102030405060708090a0b'
+  const aad = [0x11, 0x22, 0x33]
+
+  const encrypted = sm4.encrypt(msg, key, {mode: 'gcm', iv, aad, output: 'array'})
+  expect(Array.isArray(encrypted.ciphertext)).toBe(true)
+  expect(Array.isArray(encrypted.tag)).toBe(true)
+
+  const decrypted = sm4.decrypt(encrypted, key, {mode: 'gcm', iv, aad, output: 'array'})
+  expect(decrypted).toEqual(msg)
+})
+
+test('sm4-gcm: error cases', () => {
+  const msg = 'test message'
+  const key = '0123456789abcdeffedcba9876543210'
+
+  // Missing IV
+  expect(() => {
+    sm4.encrypt(msg, key, {mode: 'gcm'})
+  }).toThrow('iv is required for GCM mode')
+
+  // Invalid tag length
+  expect(() => {
+    sm4.encrypt(msg, key, {mode: 'gcm', iv: '000102030405060708090a0b', tagLength: 3})
+  }).toThrow('tagLength must be between 4 and 16 bytes')
+
+  expect(() => {
+    sm4.encrypt(msg, key, {mode: 'gcm', iv: '000102030405060708090a0b', tagLength: 17})
+  }).toThrow('tagLength must be between 4 and 16 bytes')
+
+  // Invalid decrypt input format
+  expect(() => {
+    sm4.decrypt('invalidformat', key, {mode: 'gcm', iv: '000102030405060708090a0b'})
+  }).toThrow('GCM decryption requires {ciphertext, tag} input format')
+})
