@@ -192,6 +192,130 @@ function sms4Crypt(input, output, roundKey) {
 }
 
 /**
+ * GCM mode utilities
+ */
+
+/**
+ * Galois field multiplication in GF(2^128)
+ * Used for GHASH computation in GCM mode
+ */
+function gfMultiply(x, y) {
+  const result = new Array(16).fill(0)
+  const v = [...y]
+  
+  for (let i = 0; i < 16; i++) {
+    for (let j = 0; j < 8; j++) {
+      if (x[i] & (1 << (7 - j))) {
+        for (let k = 0; k < 16; k++) {
+          result[k] ^= v[k]
+        }
+      }
+      
+      // Right shift v with polynomial reduction
+      const lsb = v[15] & 1
+      for (let k = 15; k > 0; k--) {
+        v[k] = (v[k] >>> 1) | ((v[k - 1] & 1) << 7)
+      }
+      v[0] = v[0] >>> 1
+      
+      if (lsb) {
+        v[0] ^= 0xe1  // Reduction polynomial: x^128 + x^7 + x^2 + x + 1
+      }
+    }
+  }
+  
+  return result
+}
+
+/**
+ * GHASH function for GCM authentication
+ */
+function ghash(h, aad, ciphertext) {
+  const blockSize = 16
+  let x = new Array(16).fill(0)
+  
+  // Process AAD
+  const aadBlocks = Math.ceil(aad.length / blockSize)
+  for (let i = 0; i < aadBlocks; i++) {
+    const block = new Array(blockSize).fill(0)
+    const start = i * blockSize
+    const end = Math.min(start + blockSize, aad.length)
+    for (let j = start; j < end; j++) {
+      block[j - start] = aad[j]
+    }
+    
+    for (let j = 0; j < blockSize; j++) {
+      x[j] ^= block[j]
+    }
+    x = gfMultiply(x, h)
+  }
+  
+  // Process ciphertext
+  const cipherBlocks = Math.ceil(ciphertext.length / blockSize)
+  for (let i = 0; i < cipherBlocks; i++) {
+    const block = new Array(blockSize).fill(0)
+    const start = i * blockSize
+    const end = Math.min(start + blockSize, ciphertext.length)
+    for (let j = start; j < end; j++) {
+      block[j - start] = ciphertext[j]
+    }
+    
+    for (let j = 0; j < blockSize; j++) {
+      x[j] ^= block[j]
+    }
+    x = gfMultiply(x, h)
+  }
+  
+  // Process lengths
+  const aadBitLen = aad.length * 8
+  const cipherBitLen = ciphertext.length * 8
+  const lenBlock = new Array(16).fill(0)
+  
+  // AAD length (64 bits, big-endian)
+  for (let i = 0; i < 8; i++) {
+    lenBlock[7 - i] = (aadBitLen >>> (i * 8)) & 0xff
+  }
+  
+  // Ciphertext length (64 bits, big-endian)
+  for (let i = 0; i < 8; i++) {
+    lenBlock[15 - i] = (cipherBitLen >>> (i * 8)) & 0xff
+  }
+  
+  for (let i = 0; i < 16; i++) {
+    x[i] ^= lenBlock[i]
+  }
+  x = gfMultiply(x, h)
+  
+  return x
+}
+
+/**
+ * Increment counter for CTR mode
+ */
+function incrementCounter(counter) {
+  const result = [...counter]
+  for (let i = 15; i >= 0; i--) {
+    result[i] = (result[i] + 1) & 0xff
+    if (result[i] !== 0) break
+  }
+  return result
+}
+
+/**
+ * Generate authentication subkey H = E(K, 0^128)
+ */
+function generateSubkeyH(key) {
+  const roundKey = new Array(ROUND)
+  sms4KeyExt(key, roundKey, 1) // encryption mode
+  
+  const zeroBlock = new Array(16).fill(0)
+  const h = new Array(16)
+  sms4Crypt(zeroBlock, h, roundKey)
+  
+  return h
+}
+
+/**
  * 密钥扩展算法
  */
 function sms4KeyExt(key, roundKey, cryptFlag) {
@@ -239,7 +363,7 @@ function sms4KeyExt(key, roundKey, cryptFlag) {
 }
 
 function sm4(inArray, key, cryptFlag, {
-  padding = 'pkcs#7', mode, iv = [], output = 'string'
+  padding = 'pkcs#7', mode, iv = [], output = 'string', aad = [], tagLength = 16
 } = {}) {
   if (mode === 'cbc') {
     // CBC 模式，默认走 ECB 模式
@@ -247,6 +371,16 @@ function sm4(inArray, key, cryptFlag, {
     if (iv.length !== (128 / 8)) {
       // iv 不是 128 比特
       throw new Error('iv is invalid')
+    }
+  } else if (mode === 'gcm') {
+    // GCM 模式
+    if (typeof iv === 'string') iv = hexToArray(iv)
+    if (iv.length === 0) {
+      throw new Error('iv is required for GCM mode')
+    }
+    if (typeof aad === 'string') aad = hexToArray(aad)
+    if (tagLength < 4 || tagLength > 16) {
+      throw new Error('tagLength must be between 4 and 16 bytes')
     }
   }
 
@@ -258,7 +392,13 @@ function sm4(inArray, key, cryptFlag, {
   }
 
   // 检查输入
-  if (typeof inArray === 'string') {
+  if (mode === 'gcm' && cryptFlag === DECRYPT) {
+    // GCM decryption expects {ciphertext, tag} format
+    if (!inArray || typeof inArray !== 'object' || !inArray.hasOwnProperty('ciphertext') || !inArray.hasOwnProperty('tag')) {
+      throw new Error('GCM decryption requires {ciphertext, tag} input format')
+    }
+    // Input processing is handled in GCM section below
+  } else if (typeof inArray === 'string') {
     if (cryptFlag !== DECRYPT) {
       // 加密，输入为 utf8 串
       inArray = utf8ToArray(inArray)
@@ -270,6 +410,129 @@ function sm4(inArray, key, cryptFlag, {
     inArray = [...inArray]
   }
 
+  // GCM mode processing
+  if (mode === 'gcm') {
+    // Generate authentication subkey H
+    const h = generateSubkeyH(key)
+    
+    // Generate initial counter from IV
+    let j0
+    if (iv.length === 12) {
+      // Standard 96-bit IV
+      j0 = [...iv, 0, 0, 0, 1]
+    } else {
+      // Non-standard IV length, hash with GHASH
+      j0 = ghash(h, [], iv)
+    }
+    
+    // Generate round keys for encryption
+    const roundKey = new Array(ROUND)
+    sms4KeyExt(key, roundKey, 1) // Always use encryption mode for CTR
+    
+    if (cryptFlag !== DECRYPT) {
+      // GCM Encryption
+      const ciphertext = []
+      let counter = [...j0]
+      
+      // CTR mode encryption
+      for (let i = 0; i < inArray.length; i += BLOCK) {
+        const block = inArray.slice(i, i + BLOCK)
+        counter = incrementCounter(counter)
+        
+        const keystream = new Array(16)
+        sms4Crypt(counter, keystream, roundKey)
+        
+        for (let j = 0; j < block.length; j++) {
+          ciphertext.push(block[j] ^ keystream[j])
+        }
+      }
+      
+      // Generate authentication tag
+      const tag = ghash(h, aad, ciphertext)
+      
+      // Encrypt tag with J0
+      const encryptedJ0 = new Array(16)
+      sms4Crypt(j0, encryptedJ0, roundKey)
+      
+      for (let i = 0; i < 16; i++) {
+        tag[i] ^= encryptedJ0[i]
+      }
+      
+      // Return result based on output format
+      if (output === 'array') {
+        return {
+          ciphertext,
+          tag: tag.slice(0, tagLength)
+        }
+      } else {
+        return {
+          ciphertext: ArrayToHex(ciphertext),
+          tag: ArrayToHex(tag.slice(0, tagLength))
+        }
+      }
+    } else {
+      // GCM Decryption
+      let ciphertext, expectedTag
+      
+      if (inArray && typeof inArray === 'object' && inArray.hasOwnProperty('ciphertext') && inArray.hasOwnProperty('tag')) {
+        // Input is an object with ciphertext and tag
+        ciphertext = typeof inArray.ciphertext === 'string' ? 
+                    hexToArray(inArray.ciphertext) : [...inArray.ciphertext]
+        expectedTag = typeof inArray.tag === 'string' ? 
+                     hexToArray(inArray.tag) : [...inArray.tag]
+      } else {
+        throw new Error('GCM decryption requires {ciphertext, tag} input format')
+      }
+      
+      // Verify authentication tag first
+      const computedTag = ghash(h, aad, ciphertext)
+      
+      // Encrypt tag with J0
+      const encryptedJ0 = new Array(16)
+      sms4Crypt(j0, encryptedJ0, roundKey)
+      
+      for (let i = 0; i < 16; i++) {
+        computedTag[i] ^= encryptedJ0[i]
+      }
+      
+      // Compare tags (constant time comparison)
+      let tagMatch = true
+      for (let i = 0; i < expectedTag.length; i++) {
+        if (computedTag[i] !== expectedTag[i]) {
+          tagMatch = false
+        }
+      }
+      
+      if (!tagMatch) {
+        throw new Error('Authentication tag verification failed')
+      }
+      
+      // Decrypt with CTR mode
+      const plaintext = []
+      let counter = [...j0]
+      
+      for (let i = 0; i < ciphertext.length; i += BLOCK) {
+        const block = ciphertext.slice(i, i + BLOCK)
+        counter = incrementCounter(counter)
+        
+        const keystream = new Array(16)
+        sms4Crypt(counter, keystream, roundKey)
+        
+        for (let j = 0; j < block.length; j++) {
+          plaintext.push(block[j] ^ keystream[j])
+        }
+      }
+      
+      // Return result based on output format
+      if (output === 'array') {
+        return plaintext
+      } else {
+        return arrayToUtf8(plaintext)
+      }
+    }
+  }
+
+  // Original ECB/CBC mode processing continues here...
   // 新增填充，sm4 是 16 个字节一个分组，所以统一走到 pkcs#7
   if ((padding === 'pkcs#5' || padding === 'pkcs#7') && cryptFlag !== DECRYPT) {
     const paddingCount = BLOCK - inArray.length % BLOCK

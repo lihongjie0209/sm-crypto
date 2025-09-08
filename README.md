@@ -146,6 +146,11 @@ let encryptData = sm4.encrypt(msg, key) // 加密，默认输出 16 进制字符
 let encryptData = sm4.encrypt(msg, key, {padding: 'none'}) // 加密，不使用 padding
 let encryptData = sm4.encrypt(msg, key, {padding: 'none', output: 'array'}) // 加密，不使用 padding，输出为字节数组
 let encryptData = sm4.encrypt(msg, key, {mode: 'cbc', iv: 'fedcba98765432100123456789abcdef'}) // 加密，cbc 模式
+
+// GCM 模式（认证加密）
+let encryptData = sm4.encrypt(msg, key, {mode: 'gcm', iv: '000102030405060708090a0b'}) // GCM 模式，返回 {ciphertext, tag}
+let encryptData = sm4.encrypt(msg, key, {mode: 'gcm', iv: '000102030405060708090a0b', aad: '112233445566778899aabbcc'}) // 带附加认证数据
+let encryptData = sm4.encrypt(msg, key, {mode: 'gcm', iv: '000102030405060708090a0b', tagLength: 12}) // 自定义认证标签长度（4-16字节）
 ```
 
 ### 解密
@@ -159,6 +164,10 @@ let decryptData = sm4.decrypt(encryptData, key) // 解密，默认输出 utf8 �
 let decryptData = sm4.decrypt(encryptData, key, {padding: 'none'}) // 解密，不使用 padding
 let decryptData = sm4.decrypt(encryptData, key, {padding: 'none', output: 'array'}) // 解密，不使用 padding，输出为字节数组
 let decryptData = sm4.decrypt(encryptData, key, {mode: 'cbc', iv: 'fedcba98765432100123456789abcdef'}) // 解密，cbc 模式
+
+// GCM 模式解密
+let decryptData = sm4.decrypt(encryptData, key, {mode: 'gcm', iv: '000102030405060708090a0b'}) // encryptData 应为 {ciphertext, tag} 格式
+let decryptData = sm4.decrypt(encryptData, key, {mode: 'gcm', iv: '000102030405060708090a0b', aad: '112233445566778899aabbcc'}) // 需提供相同的 AAD
 ```
 
 ## 协议
